@@ -1,20 +1,29 @@
 #include "drvadsb.h"
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
-DAA_RDR_states states;
+int sockfd;
 
 void SignalHandler(int signal) {
     printf("Interrupt signal received. Shutting down...\n");
-    states.run_flag = 0;
+    close(sockfd);
+    exit(0);
 }
 
-int main(int argc, char **argv) {
+int main() {
+    struct sockaddr_in serveraddr;
+
+    // Handle termination signals
     signal(SIGINT, SignalHandler);
+    signal(SIGTERM, SignalHandler);
 
-    InitState(&states);
-    ProcessIncomingMessages(&states);
+    // Initialize ADS-B listener
+    InitADSBListener(&sockfd, &serveraddr);
 
-    pthread_mutex_destroy(&states.mutex);
-    printf("Program terminated gracefully.\n");
+    // Start receiving packets
+    ReceiveADSBPackets(sockfd); 
+
     return 0;
 }
