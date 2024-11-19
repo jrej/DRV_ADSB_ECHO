@@ -1,49 +1,118 @@
-#ifndef ECOFLIGHT_RADAR_H
-#define ECOFLIGHT_RADAR_H
+#include "ecoflight_radar.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
 
 /******************************************************************************
- * Includes
+ * Initialize the Radar Driver
  ******************************************************************************/
-#include <stdint.h>
-#include <stdbool.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <time.h>
+void InitRadarDriver(RadarState *state) {
+    if (state == NULL) {
+        fprintf(stderr, "RadarState cannot be NULL.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Initialize socket
+    state->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (state->sockfd < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Set up server address
+    memset(&state->server_addr, 0, sizeof(state->server_addr));
+    state->server_addr.sin_family = AF_INET;
+    state->server_addr.sin_addr.s_addr = INADDR_ANY;
+    state->server_addr.sin_port = htons(RADAR_PORT);
+
+    // Bind the socket
+    if (bind(state->sockfd, (const struct sockaddr *)&state->server_addr, sizeof(state->server_addr)) < 0) {
+        perror("Bind failed");
+        close(state->sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Initialize state
+    state->num_tracks = 0;
+    pthread_mutex_init(&state->state_mutex, NULL);
+
+    printf("EcoFlight Radar Driver initialized on port %d\n", RADAR_PORT);
+}
 
 /******************************************************************************
- * Constants and Macros
+ * Process Raw Radar Data
  ******************************************************************************/
-#define RADAR_BUFFER_SIZE 2048
-#define RADAR_PORT 55000
-#define MAX_TRACKS 256
+void ProcessRadarData(const char *raw_data, RadarState *state) {
+    if (raw_data == NULL || state == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&state->state_mutex);
+
+    // Clear current tracks
+    state->num_tracks = 0;
+
+    // Example parsing logic (mocked): Replace with actual radar decoding logic
+    uint32_t num_tracks = 0;
+    sscanf(raw_data, "%u", &num_tracks);
+    state->num_tracks = num_tracks > MAX_TRACKS ? MAX_TRACKS : num_tracks;
+
+    const char *track_data = raw_data + sizeof(uint32_t);
+    for (uint32_t i = 0; i < state->num_tracks; i++) {
+        RadarTrack *track = &state->tracks[i];
+        sscanf(track_data, "%u,%f,%f,%f,%f,%f,%hhu",
+               &track->track_id,
+               &track->latitude,
+               &track->longitude,
+               &track->altitude,
+               &track->velocity,
+               &track->heading,
+               &track->confidence);
+
+        track->is_valid = (track->confidence > 50); // Example validity check
+        track_data += sizeof(RadarTrack); // Adjust based on actual format
+    }
+
+    pthread_mutex_unlock(&state->state_mutex);
+}
 
 /******************************************************************************
- * Data Structures
+ * Receive Radar Packets
  ******************************************************************************/
-typedef struct RadarTrack {
-    uint32_t track_id;       // Unique ID for the track
-    float latitude;          // Latitude of the target
-    float longitude;         // Longitude of the target
-    float altitude;          // Altitude in meters
-    float velocity;          // Velocity in m/s
-    float heading;           // Heading in degrees
-    uint8_t confidence;      // Confidence level (0-100)
-    uint8_t is_valid;        // Track validity flag
-} RadarTrack;
+void ReceiveRadarPackets(RadarState *state) {
+    char buffer[RADAR_BUFFER_SIZE];
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
 
-typedef struct RadarState {
-    int sockfd;                          // Socket file descriptor
-    struct sockaddr_in server_addr;      // Server address
-    RadarTrack tracks[MAX_TRACKS];       // Array of detected tracks
-    uint32_t num_tracks;                 // Number of active tracks
-    pthread_mutex_t state_mutex;         // Mutex for thread safety
-} RadarState;
+    printf("Waiting for radar packets...\n");
 
-/******************************************************************************
- * Function Prototypes
- ******************************************************************************/
-void InitRadarDriver(RadarState *state);
-void ProcessRadarData(const char *raw_data, RadarState *state);
-void ReceiveRadarPackets(RadarState *state);
+    while (1) {
+        ssize_t n = recvfrom(state->sockfd, buffer, RADAR_BUFFER_SIZE, 0,
+                             (struct sockaddr *)&client_addr, &addr_len);
+        if (n < 0) {
+            perror("recvfrom failed");
+            continue;
+        }
 
-#endif // ECOFLIGHT_RADAR_H
+        buffer[n] = '\0'; // Null-terminate received data
+        printf("Received raw radar data: %s\n", buffer);
+
+        // Process the radar data
+        ProcessRadarData(buffer, state);
+
+        // Display parsed tracks
+        pthread_mutex_lock(&state->state_mutex);
+        for (uint32_t i = 0; i < state->num_tracks; i++) {
+            RadarTrack *track = &state->tracks[i];
+            if (track->is_valid) {
+                printf("Track ID: %u | Lat: %.6f | Lon: %.6f | Alt: %.2f m | Vel: %.2f m/s | Head: %.2f° | Conf: %u%%\n",
+                       track->track_id, track->latitude, track->longitude,
+                       track->altitude, track->velocity, track->heading,
+                       track->confidence);
+            }
+        }
+        pthread_mutex_unlock(&state->state_mutex);
+    }
+}
